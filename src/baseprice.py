@@ -113,7 +113,3 @@ Remarks:
 - It's to be expected since we're taking an average of all rides across all regions in NYC at that time. 
 - Variations across regions can't be captured with a SLR (time not included to avoid collinearity). 
 """
-
-
-
-

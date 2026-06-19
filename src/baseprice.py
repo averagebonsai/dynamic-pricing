@@ -12,6 +12,7 @@ def format_df(input, output):
     processed_lf = (
         lf.with_columns([
             ((pl.col("pickup_datetime") - pl.col("request_datetime")).dt.total_seconds()).alias("waiting_time"), 
+            (pl.col("request_datetime").dt.day()).alias("request_date"),
             ((pl.col("request_datetime").dt.day() + 3) % 7).alias("day_of_week"),
             (pl.col("request_datetime").dt.hour()).alias("request_hour"),
             (pl.col("base_passenger_fare") + pl.col("bcf") + pl.col("sales_tax")).round(2).alias("base_fare"), 
@@ -26,7 +27,7 @@ def format_df(input, output):
     processed_lf.sink_parquet(output)
     print(f"Successfully exported LazyFrame to {output}")
 
-def establish_baseline(input): 
+def establish_baseline(input, data_path): 
     """
     Calculates base prices ("edge weights") for each (start, destination) pair / each edge. 
     Uses Tuesday 2am - 4am as a baseline. 
@@ -56,7 +57,7 @@ def establish_baseline(input):
     )
     intercept, price_per_mile = regression(baseline_matrix) #needs both fare & distance
 
-    final_graph = dist_time_matrix.join(baseline_matrix, on = ['PULocationID', 'DOLocationID'], how = 'full').drop(['PULocationID_right', 'DOLocationID_right', 'baseline_distance_right'])
+    final_graph = dist_time_matrix.join(baseline_matrix, on = ['PULocationID', 'DOLocationID'], how = 'full', coalesce = True).drop(['baseline_distance_right'])
     final_graph = final_graph.with_columns(
         pl.when(pl.col("baseline_fare").is_null())
         .then((pl.col("baseline_distance") * price_per_mile + intercept).round(2))
@@ -67,7 +68,7 @@ def establish_baseline(input):
     # cannot sort df columns in with_columns operator -- isolates columns and performs operations on them. 
     # row orders must be kept constant.
     final_graph = final_graph.sort(['PULocationID', 'DOLocationID']) 
-    final_graph.write_csv("graph.csv")
+    final_graph.write_csv(data_path / "graph.csv")
     print(f"Successfully retrieved baseline prices for every edge, graph created.")
 
 def regression(df, xcol = "baseline_distance", ycol = "baseline_fare"): 
@@ -100,12 +101,11 @@ if __name__ == "__main__":
     
     # 2. Build the paths dynamically relative to the script location
     # This mimics the "../data/" structure safely
-    input_path = SCRIPT_DIR.parent / "data" / "fhvhv_tripdata_2026-01.parquet"
-    output_path = SCRIPT_DIR.parent / "data" / "new.parquet"
+    data_path = SCRIPT_DIR.parent / "data" 
     
     # 3. Run the function
-    format_df(str(input_path), str(output_path))
-    establish_baseline(str(output_path))
+    format_df(str(data_path / "fhvhv_tripdata_2026-01.parquet"), str(data_path / "new.parquet"))
+    establish_baseline(str(data_path / "new.parquet"), data_path)
 
 """
 Remarks: 

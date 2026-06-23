@@ -13,4 +13,6 @@ Here's the general gist of the environment set-up:
 
 What has not been done: 
 - Something that makes passenger demand go down as prices go up. 
+- The queue simulation that matches passenger demand with taxi supply. 
+--- when supply > demand, taxis just follow passenger. remaining taxis that are empty choose where to go. 
 - The actual RL simulation (each step). 

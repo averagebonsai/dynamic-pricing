@@ -1,0 +1,296 @@
+"""
+rl_algorithms.py
+================
+Function-only reinforcement learning algorithms for ride-hailing experiments.
+
+This module intentionally contains only generic RL algorithms.
+It does not include data loading, graph construction, plotting, or a main script.
+
+Expected single-agent environment interface
+-------------------------------------------
+state = env.reset()
+next_state, reward = env.step(action)
+
+Also supports Gym-style returns:
+next_state, reward, done, info = env.step(action)
+next_state, reward, terminated, truncated, info = env.step(action)
+
+Expected multi-agent environment interface
+------------------------------------------
+state = env.reset()
+next_state, rewards = env.step(actions)
+
+where:
+- actions has shape (n_agents,)
+- rewards has shape (n_agents,)
+
+All states are assumed to be discrete integer IDs.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+import numpy as np
+
+
+def unpack_step(result: Tuple[Any, ...]) -> Tuple[Any, Any, bool, Dict[str, Any]]:
+    """
+    Normalize different environment step return formats.
+
+    Supported formats:
+    - (next_state, reward)
+    - (next_state, reward, done, info)
+    - (next_state, reward, terminated, truncated, info)
+    """
+    if len(result) == 2:
+        next_state, reward = result
+        return next_state, reward, False, {}
+
+    if len(result) == 4:
+        next_state, reward, done, info = result
+        return next_state, reward, bool(done), dict(info or {})
+
+    if len(result) == 5:
+        next_state, reward, terminated, truncated, info = result
+        done = bool(terminated) or bool(truncated)
+        return next_state, reward, done, dict(info or {})
+
+    raise ValueError("Unsupported env.step(...) return format.")
+
+
+def select_action(
+    q_values: Sequence[float],
+    eps: float = 0.1,
+    policy: str = "epsilon_greedy",
+    temperature: float = 1.0,
+) -> int:
+    """
+    Select an action from Q-values.
+
+    Parameters
+    ----------
+    q_values:
+        Action values for the current state.
+    eps:
+        Exploration probability for epsilon-greedy.
+    policy:
+        One of: "epsilon_greedy", "softmax", "greedy", "random".
+    temperature:
+        Softmax temperature. Larger values produce more exploration.
+    """
+    q = np.asarray(q_values, dtype=float)
+    n_actions = len(q)
+
+    if n_actions == 0:
+        raise ValueError("q_values must contain at least one action value.")
+
+    if policy == "random":
+        return int(np.random.randint(n_actions))
+
+    if policy == "greedy":
+        return int(np.argmax(q))
+
+    if policy == "epsilon_greedy":
+        if np.random.rand() < eps:
+            return int(np.random.randint(n_actions))
+        return int(np.argmax(q))
+
+    if policy == "softmax":
+        if temperature <= 0:
+            raise ValueError("temperature must be positive.")
+        z = q / temperature
+        z = z - np.max(z)
+        probs = np.exp(z) / np.exp(z).sum()
+        return int(np.random.choice(n_actions, p=probs))
+
+    raise ValueError(f"Unknown policy: {policy}")
+
+
+def q_learning(
+    env: Any,
+    n_states: int,
+    n_actions: int,
+    episodes: int = 1000,
+    steps_per_episode: int = 100,
+    alpha: float = 0.05,
+    discount: float = 0.95,
+    eps: float = 0.1,
+    policy: str = "epsilon_greedy",
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Tabular Q-learning for a single agent.
+
+    Update rule:
+    Q(s,a) <- Q(s,a) + alpha * [r + discount * max_a' Q(s',a') - Q(s,a)]
+    """
+    q_table = np.zeros((n_states, n_actions), dtype=float)
+    episode_rewards: List[float] = []
+
+    for _ in range(episodes):
+        state = int(env.reset())
+        total_reward = 0.0
+
+        for _ in range(steps_per_episode):
+            action = select_action(q_table[state], eps=eps, policy=policy)
+            next_state, reward, done, _ = unpack_step(env.step(action))
+            next_state = int(next_state)
+            reward = float(reward)
+
+            target = reward + discount * np.max(q_table[next_state])
+            q_table[state, action] += alpha * (target - q_table[state, action])
+
+            total_reward += reward
+            state = next_state
+
+            if done:
+                break
+
+        episode_rewards.append(total_reward)
+
+    return q_table, np.asarray(episode_rewards)
+
+
+def sarsa(
+    env: Any,
+    n_states: int,
+    n_actions: int,
+    episodes: int = 1000,
+    steps_per_episode: int = 100,
+    alpha: float = 0.05,
+    discount: float = 0.95,
+    eps: float = 0.1,
+    policy: str = "epsilon_greedy",
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Tabular SARSA for a single agent.
+
+    SARSA is on-policy: it updates using the next action actually selected by
+    the behavior policy.
+    """
+    q_table = np.zeros((n_states, n_actions), dtype=float)
+    episode_rewards: List[float] = []
+
+    for _ in range(episodes):
+        state = int(env.reset())
+        action = select_action(q_table[state], eps=eps, policy=policy)
+        total_reward = 0.0
+
+        for _ in range(steps_per_episode):
+            next_state, reward, done, _ = unpack_step(env.step(action))
+            next_state = int(next_state)
+            reward = float(reward)
+            next_action = select_action(q_table[next_state], eps=eps, policy=policy)
+
+            target = reward + discount * q_table[next_state, next_action]
+            q_table[state, action] += alpha * (target - q_table[state, action])
+
+            total_reward += reward
+            state, action = next_state, next_action
+
+            if done:
+                break
+
+        episode_rewards.append(total_reward)
+
+    return q_table, np.asarray(episode_rewards)
+
+
+def double_q_learning(
+    env: Any,
+    n_states: int,
+    n_actions: int,
+    episodes: int = 1000,
+    steps_per_episode: int = 100,
+    alpha: float = 0.05,
+    discount: float = 0.95,
+    eps: float = 0.1,
+    policy: str = "epsilon_greedy",
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Double Q-learning for a single agent.
+
+    This reduces overestimation bias by maintaining two independent Q-tables.
+    """
+    q1 = np.zeros((n_states, n_actions), dtype=float)
+    q2 = np.zeros((n_states, n_actions), dtype=float)
+    episode_rewards: List[float] = []
+
+    for _ in range(episodes):
+        state = int(env.reset())
+        total_reward = 0.0
+
+        for _ in range(steps_per_episode):
+            action = select_action(q1[state] + q2[state], eps=eps, policy=policy)
+            next_state, reward, done, _ = unpack_step(env.step(action))
+            next_state = int(next_state)
+            reward = float(reward)
+
+            if np.random.rand() < 0.5:
+                best_next = int(np.argmax(q1[next_state]))
+                target = reward + discount * q2[next_state, best_next]
+                q1[state, action] += alpha * (target - q1[state, action])
+            else:
+                best_next = int(np.argmax(q2[next_state]))
+                target = reward + discount * q1[next_state, best_next]
+                q2[state, action] += alpha * (target - q2[state, action])
+
+            total_reward += reward
+            state = next_state
+
+            if done:
+                break
+
+        episode_rewards.append(total_reward)
+
+    return q1, q2, np.asarray(episode_rewards)
+
+
+def independent_q_learning(
+    env: Any,
+    n_agents: int,
+    n_states: int,
+    n_actions: int,
+    episodes: int = 1000,
+    steps_per_episode: int = 100,
+    alpha: float = 0.05,
+    discount: float = 0.95,
+    eps: float = 0.1,
+    policy: str = "epsilon_greedy",
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Independent Q-learning for multi-agent reinforcement learning.
+
+    Each agent has its own Q-table and treats the other agents as part of the
+    environment. This is a simple baseline for oligopoly experiments.
+    """
+    q_tables = np.zeros((n_agents, n_states, n_actions), dtype=float)
+    episode_rewards: List[np.ndarray] = []
+
+    for _ in range(episodes):
+        state = int(env.reset())
+        total_rewards = np.zeros(n_agents, dtype=float)
+
+        for _ in range(steps_per_episode):
+            actions = np.asarray([
+                select_action(q_tables[i, state], eps=eps, policy=policy)
+                for i in range(n_agents)
+            ], dtype=int)
+
+            next_state, rewards, done, _ = unpack_step(env.step(actions))
+            next_state = int(next_state)
+            rewards = np.asarray(rewards, dtype=float)
+
+            for i in range(n_agents):
+                action = actions[i]
+                target = rewards[i] + discount * np.max(q_tables[i, next_state])
+                q_tables[i, state, action] += alpha * (target - q_tables[i, state, action])
+
+            total_rewards += rewards
+            state = next_state
+
+            if done:
+                break
+
+        episode_rewards.append(total_rewards.copy())
+
+    return q_tables, np.asarray(episode_rewards)

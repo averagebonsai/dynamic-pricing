@@ -94,6 +94,41 @@ def regression(df, xcol = "baseline_distance", ycol = "baseline_fare"):
     print(f"Model RMSE: {rmse:.2f}")
     return intercept, price_per_mile
 
+def taxi_demand_origin(input, data_path): 
+    lf = pl.scan_parquet(input)
+    
+    unique_dates = lf.select(["request_date", "day_of_week"]).unique()
+    unique_zones = lf.select(pl.col("PULocationID").unique())
+
+    grid_without_hours = unique_dates.join(unique_zones, how = 'cross')
+    grid = grid_without_hours.with_columns(
+        [pl.lit(list(range(24))).alias("request_hour")] #to account for rows with 0 rides. 
+        ).explode("request_hour") #note: request_hour is here. if it were above, it won't have rows for quiet zones with no rides 
+
+    historical_counts = ( 
+        lf.group_by(["request_date", "day_of_week", "request_hour", "PULocationID"])
+        .len(name = "num_trips") #number of rides in each date, request_hour, start location. day_of_week shouldn't have any impact
+    )
+
+    full_grid = (
+        grid.join(
+            historical_counts, 
+            on = ["request_date", "day_of_week", "request_hour", "PULocationID"],
+            how = 'left'
+            )
+            .with_columns(pl.col("num_trips").fill_null(0))
+        ) #grid of counts for each unique time-place, including those with 0 rides
+
+    mle_params = (
+        full_grid.group_by(["PULocationID", "day_of_week", "request_hour"])
+        .agg(pl.col("num_trips").mean().alias("poisson_parameter")) #note: E(X) = lambda for Poisson Distribution.
+        .sort(["PULocationID", "day_of_week", "request_hour"])
+        )
+
+    df = mle_params.collect()
+    df.write_csv(data_path / "mle_params.csv")
+    print("Successfully written MLE parameters.")
+
 
 if __name__ == "__main__": 
     # 1. Get the absolute path of the directory where this script lives
@@ -106,6 +141,7 @@ if __name__ == "__main__":
     # 3. Run the function
     format_df(str(data_path / "fhvhv_tripdata_2026-01.parquet"), str(data_path / "new.parquet"))
     establish_baseline(str(data_path / "new.parquet"), data_path)
+    taxi_demand_origin(str(data_path / "new.parquet"), data_path)
 
 """
 Remarks: 

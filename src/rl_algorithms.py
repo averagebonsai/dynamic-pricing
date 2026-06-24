@@ -294,3 +294,50 @@ def independent_q_learning(
         episode_rewards.append(total_rewards.copy())
 
     return q_tables, np.asarray(episode_rewards)
+
+class Exp3Agent:
+    """
+    Independent EXP3 Bandit Agent running on each pickup zone to choose surge prices.
+    """
+    def __init__(self, n_arms: int, n_actions: int = 4, gamma: float = 0.1, eta: float = 0.1):
+        self.n_arms = n_arms
+        self.n_actions = n_actions
+        self.gamma = gamma
+        self.eta = eta
+
+        # Log weights initialization
+        self.log_weights = np.zeros((n_arms, n_actions), dtype=float)
+        self.probs = np.ones((n_arms, n_actions), dtype=float) / n_actions
+        self._update_probs()
+
+    def _update_probs(self):
+        for arm in range(self.n_arms):
+            log_w = self.log_weights[arm]
+            w = np.exp(log_w - np.max(log_w)) # stable softmax
+            sum_w = np.sum(w)
+            if sum_w > 0:
+                p_weights = w / sum_w
+            else:
+                p_weights = np.ones(self.n_actions) / self.n_actions
+
+            # EXP3 probability distribution mixture
+            self.probs[arm] = (1.0 - self.gamma) * p_weights + self.gamma / self.n_actions
+
+    def select_actions(self) -> np.ndarray:
+        actions = np.zeros(self.n_arms, dtype=int)
+        for arm in range(self.n_arms):
+            actions[arm] = np.random.choice(self.n_actions, p=self.probs[arm])
+        return actions
+
+    def update(self, actions: np.ndarray, rewards: np.ndarray):
+        # actions and rewards have shape (n_arms,)
+        for arm in range(self.n_arms):
+            a = actions[arm]
+            p = self.probs[arm, a]
+            r = rewards[arm] # scaled reward in [0, 1]
+
+            # EXP3 update rule
+            estimated_reward = r / p
+            self.log_weights[arm, a] += self.eta * estimated_reward
+
+        self._update_probs()

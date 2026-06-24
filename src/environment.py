@@ -94,7 +94,7 @@ def regression(df, xcol = "baseline_distance", ycol = "baseline_fare"):
     print(f"Model RMSE: {rmse:.2f}")
     return intercept, price_per_mile
 
-def taxi_demand_origin(input, data_path): 
+def taxi_demand_historical(input, data_path): 
     lf = pl.scan_parquet(input)
     
     unique_dates = lf.select(["request_date", "day_of_week"]).unique()
@@ -121,13 +121,58 @@ def taxi_demand_origin(input, data_path):
 
     mle_params = (
         full_grid.group_by(["PULocationID", "day_of_week", "request_hour"])
-        .agg(pl.col("num_trips").mean().alias("poisson_parameter")) #note: E(X) = lambda for Poisson Distribution.
+        .agg(pl.col("num_trips").mean().alias("historical_poisson")) #note: E(X) = lambda for Poisson Distribution.
         .sort(["PULocationID", "day_of_week", "request_hour"])
         )
 
     df = mle_params.collect()
-    df.write_csv(data_path / "mle_params.csv")
-    print("Successfully written MLE parameters.")
+    df.write_csv(data_path / "historical_mle_params.csv")
+    print("Successfully written MLE parameters.") #note: this is historical demand, not latent demand (accounting for those who choose not to ride)
+
+def latent_demand(input_parquet, graph_csv, historical_csv, output_path, theta = 0.4): 
+    """
+    1. Loads raw ride data and baseline graph.
+    2. Calculates implied surge multipliers for every individual historical ride.
+    3. Calculates the passenger acceptance probability for each ride.
+    4. Aggregates by Origin & Hour of Week to compute the unsuppressed latent Poisson lambda.
+    """
+
+    lf = pl.scan_parquet(input_parquet)
+    graph_df = pl.read_csv(graph_csv).select(['PULocationID', 'DOLocationID', 'baseline_fare'])
+    historical_df = pl.read_csv(historical_csv)
+
+    joined_lf = lf.join(graph_df.lazy(), on = ['PULocationID', 'DOLocationID'], how = 'left')
+    processed_lf = joined_lf.with_columns([
+        pl.when(pl.col('baseline_fare') > 0)
+        .then((pl.col('base_fare') / pl.col('baseline_fare')).clip(lower_bound = 1.0)) #implied surge multiplier = fare ride / baseline fare
+        .otherwise(1.0)
+        .alias("implied_surge")
+    ]).with_columns([
+        ((-theta * (pl.col('implied_surge') - 1.0)).exp()).alias("p_accept") #probability of accepting the ride = exp(-theta * (surge - 1))
+    ])
+
+    init_poisson = (
+        processed_lf
+        .group_by(['PULocationID', 'day_of_week', 'request_hour'])
+        .agg([
+            pl.col('p_accept').mean().alias('avg_historical_acceptance')
+        ])
+        .collect()
+        .sort(['PULocationID', 'day_of_week', 'request_hour'])
+    )
+
+    final_df = historical_df.join(init_poisson, on = ['PULocationID', 'day_of_week', 'request_hour'], how = 'left') #we're sure that the left df has a entry for every zone, every hour of week.
+    final_df = final_df.with_columns(
+        pl.when(pl.col("avg_historical_acceptance") > 0.01) #demand becomes wildly unstable if the denominator becomes 
+        .then(pl.col("historical_poisson") / pl.col("avg_historical_acceptance"))
+        .otherwise(pl.col("historical_poisson"))
+        .round(2)
+        .alias("latent_poisson")
+    )
+    final_df = final_df.with_columns(pl.col('avg_historical_acceptance').round(2))
+
+    final_df.write_csv(output_path / "latent_mle_params.csv")
+    print("Successfully obtained latent poisson parameters.")
 
 
 if __name__ == "__main__": 
@@ -141,11 +186,15 @@ if __name__ == "__main__":
     # 3. Run the function
     format_df(str(data_path / "fhvhv_tripdata_2026-01.parquet"), str(data_path / "new.parquet"))
     establish_baseline(str(data_path / "new.parquet"), data_path)
-    taxi_demand_origin(str(data_path / "new.parquet"), data_path)
+    taxi_demand_historical(str(data_path / "new.parquet"), data_path)
+    latent_demand(str(data_path / "new.parquet"), str(data_path / "graph.csv"), str(data_path / "historical_mle_params.csv"), data_path)
 
 """
-Remarks: 
+Remarks for baseline price: 
 - The regression has a RMSE of 9.23, which is approximately an average error of $9 per ride at 2-5am on Tuesdays and Wednesdays. 
 - It's to be expected since we're taking an average of all rides across all regions in NYC at that time. 
 - Variations across regions can't be captured with a SLR (time not included to avoid collinearity). 
+
+Remarks for latent demand: 
+- Underlying assumption: Surge multiplier and demand related by demand = exp(-theta * (surge - 1))
 """

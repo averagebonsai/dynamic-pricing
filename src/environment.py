@@ -34,7 +34,7 @@ def establish_baseline(input, data_path):
     Here, base price for each (start, destination) pair is just the average price across all rides in this region.
     """
     lf = pl.scan_parquet(input)
-    dist_time_matrix = (
+    dist_time_matrix = ( # across all time periods
         lf
         .group_by(['PULocationID', 'DOLocationID'])
         .agg(
@@ -44,7 +44,7 @@ def establish_baseline(input, data_path):
         .collect()
         .sort(['PULocationID', 'DOLocationID'])
     )
-    relevant_lf = lf.filter((pl.col("day_of_week").is_in([2, 3])) & (pl.col("request_hour").is_in([2, 3])))
+    relevant_lf = lf.filter((pl.col("day_of_week").is_in([2, 3])) & (pl.col("request_hour").is_in([2, 3]))) #only for tues/wed 2-3am
     baseline_matrix = (
         relevant_lf
         .group_by(['PULocationID', 'DOLocationID'])
@@ -70,6 +70,7 @@ def establish_baseline(input, data_path):
     final_graph = final_graph.sort(['PULocationID', 'DOLocationID']) 
     final_graph.write_csv(data_path / "graph.csv")
     print(f"Successfully retrieved baseline prices for every edge, graph created.")
+    return intercept, price_per_mile
 
 def regression(df, xcol = "baseline_distance", ycol = "baseline_fare"): 
     """
@@ -129,7 +130,7 @@ def taxi_demand_historical(input, data_path):
     df.write_csv(data_path / "historical_mle_params.csv")
     print("Successfully written MLE parameters.") #note: this is historical demand, not latent demand (accounting for those who choose not to ride)
 
-def latent_demand(input_parquet, graph_csv, historical_csv, output_path, theta = 0.4): 
+def latent_demand(input_parquet, graph_csv, historical_csv, intercept, output_path, theta = 0.4): 
     """
     1. Loads raw ride data and baseline graph.
     2. Calculates implied surge multipliers for every individual historical ride.
@@ -138,13 +139,13 @@ def latent_demand(input_parquet, graph_csv, historical_csv, output_path, theta =
     """
 
     lf = pl.scan_parquet(input_parquet)
-    graph_df = pl.read_csv(graph_csv).select(['PULocationID', 'DOLocationID', 'baseline_fare'])
+    graph_df = pl.read_csv(graph_csv).select(['PULocationID', 'DOLocationID', 'baseline_distance', 'baseline_fare'])
     historical_df = pl.read_csv(historical_csv)
 
     joined_lf = lf.join(graph_df.lazy(), on = ['PULocationID', 'DOLocationID'], how = 'left')
     processed_lf = joined_lf.with_columns([
         pl.when(pl.col('baseline_fare') > 0)
-        .then((pl.col('base_fare') / pl.col('baseline_fare')).clip(lower_bound = 1.0)) #implied surge multiplier = fare ride / baseline fare
+        .then((((pl.col('base_fare') - intercept) / pl.col('trip_miles') * pl.col('baseline_distance') + intercept) / pl.col('baseline_fare')).clip(lower_bound = 1.0)) #implied surge multiplier: normalised fare price / baseline price
         .otherwise(1.0)
         .alias("implied_surge")
     ]).with_columns([
@@ -164,12 +165,19 @@ def latent_demand(input_parquet, graph_csv, historical_csv, output_path, theta =
     final_df = historical_df.join(init_poisson, on = ['PULocationID', 'day_of_week', 'request_hour'], how = 'left') #we're sure that the left df has a entry for every zone, every hour of week.
     final_df = final_df.with_columns(
         pl.when(pl.col("avg_historical_acceptance") > 0.01) #demand becomes wildly unstable if the denominator becomes 
-        .then(pl.col("historical_poisson") / pl.col("avg_historical_acceptance"))
-        .otherwise(pl.col("historical_poisson"))
+        .then(pl.col("historical_poisson") / pl.col("avg_historical_acceptance")) 
+        .otherwise(pl.col("historical_poisson")) 
         .round(2)
-        .alias("latent_poisson")
+        .alias("latent_poisson") 
     )
+
+    #note: here, we aggregate average historical acceptance across ALL 4 firms. latent x avg_historical_acceptance = historical/observed.
+    #the difference between latent and historical is in the number of people overall who saw the price and chose not to take it. 
+    #when we calculate how the taxi demand is spread across the 4 firms in competition, we use a different formula (Multinomial Logit Choice). 
+    #there, choosing not to take any ride is considered an option, and is baked into the softmax equation. 
+
     final_df = final_df.with_columns(pl.col('avg_historical_acceptance').round(2))
+    print(f"Minimum historical acceptance: {final_df['avg_historical_acceptance'].min()}") 
 
     final_df.write_csv(output_path / "latent_mle_params.csv")
     print("Successfully obtained latent poisson parameters.")
@@ -185,9 +193,9 @@ if __name__ == "__main__":
     
     # 3. Run the function
     format_df(str(data_path / "fhvhv_tripdata_2026-01.parquet"), str(data_path / "new.parquet"))
-    establish_baseline(str(data_path / "new.parquet"), data_path)
+    intercept, price_per_mile = establish_baseline(str(data_path / "new.parquet"), data_path)
     taxi_demand_historical(str(data_path / "new.parquet"), data_path)
-    latent_demand(str(data_path / "new.parquet"), str(data_path / "graph.csv"), str(data_path / "historical_mle_params.csv"), data_path)
+    latent_demand(str(data_path / "new.parquet"), str(data_path / "graph.csv"), str(data_path / "historical_mle_params.csv"), intercept, data_path)
 
 """
 Remarks for baseline price: 
@@ -196,5 +204,5 @@ Remarks for baseline price:
 - Variations across regions can't be captured with a SLR (time not included to avoid collinearity). 
 
 Remarks for latent demand: 
-- Underlying assumption: Surge multiplier and demand related by demand = exp(-theta * (surge - 1))
+- Underlying assumption: Surge multiplier and demand related by latent demand = historical demand / exp(-theta * (surge - 1))
 """

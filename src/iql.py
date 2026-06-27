@@ -71,7 +71,16 @@ def run_iql(
                 ns = next_states[i]
                 r = rewards[i]
                 
-                target = r + discount * np.max(q_tables[i, ns])
+                ### Normalize and scale the reward to [0, 1] based on average fare per taxi in the zone to stabilize and speed up Q-learning convergence.
+
+                n_taxis = env.taxis[i]
+                if n_taxis > 0:
+                    avg_fare = r / n_taxis
+                    scaled_r = np.clip(avg_fare / 100.0, 0.0, 1.0)
+                else:
+                    scaled_r = 0.0
+
+                target = scaled_r + discount * np.max(q_tables[i, ns])
                 q_tables[i, s, a] += alpha * (target - q_tables[i, s, a])
                 
             total_reward += float(np.sum(rewards))

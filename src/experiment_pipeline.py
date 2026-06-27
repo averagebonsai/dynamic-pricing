@@ -19,25 +19,27 @@ if str(PROJECT_DIR) not in sys.path:
 from rmab_algorithms import rmab_q_learning, unpack_step, rmab_index_policy
 from rl_algorithms import Exp3Agent
 from destination import DestinationNNPredictor
+from iql import run_iql
 
 
 class MonopolyTaxiEnv:
     """
-    Environment wrapper for single-agent Restless Multi-Armed Bandit (RMAB) simulation.
+    Environment wrapper for single-agent IQL simulation.
     Each taxi pickup zone is modeled as an arm in the bandit.
     The state of each arm is the discretized number of taxis currently in the zone.
+    (currently stateless) <-- in future, to implement 3 states. [low supply, meet supply, oversupply]. 
     """
     def __init__(
         self,
-        latent_df: pl.DataFrame,
-        graph_dict: dict,
-        predictor: DestinationNNPredictor,
-        do_to_pu: dict,
+        latent_df: pl.DataFrame, #latent taxi demand
+        graph_dict: dict, #graph with baseline distances, times
+        predictor: DestinationNNPredictor, #probabilities from origin --> destination
+        do_to_pu: dict, #drop-off to pick-up mapping
         fleet_size: int = 5000,
-        n_states: int = 10,
-        bin_size: int = 10,
+        n_states: int = 10, #number of bins --> how many "states of taxis" are there. 
+        bin_size: int = 10, #how many in each bin --> the idea is that the status of each zone is not an integer num of taxis, but a range (e.g [0, 9])
         theta: float = 0.4,
-        steps_per_episode: int = 24,
+        steps_per_episode: int = 120,
         start_day: int = 0,
         start_hour: int = 0,
         default_distance: float = 5.0,
@@ -59,9 +61,9 @@ class MonopolyTaxiEnv:
         self.default_distance = default_distance
         self.price_per_mile = price_per_mile
         self.intercept = intercept
-        self.active_multiplier = active_multiplier
+        self.active_multiplier = active_multiplier # <-- to modify to change to a few strategies, [1.0, 1.2, 1.5, 1.8, 2.0]
 
-        self.n_arms = len(self.predictor.unique_pu)
+        self.n_arms = len(self.predictor.unique_pu) #number of zones = 262
         self.pu_to_idx = {pu: idx for idx, pu in enumerate(self.predictor.unique_pu)}
         self.idx_to_pu = {idx: pu for idx, pu in enumerate(self.predictor.unique_pu)}
 
@@ -71,16 +73,24 @@ class MonopolyTaxiEnv:
             pu = row["PULocationID"]
             day = row["day_of_week"]
             hour = row["request_hour"]
-            self.demand_lookup[(pu, day, hour)] = row["latent_poisson"]
+            val = row["latent_poisson"]
+            if val is None or np.isnan(val):
+                val = row["historical_poisson"]
+                if val is None or np.isnan(val):
+                    val = 0.0
+            self.demand_lookup[(pu, day, hour)] = val
 
-        self.taxis = np.zeros(self.n_arms, dtype=int)
+        self.taxis = np.zeros(self.n_arms, dtype=int) # <-- to modify 
         self.current_step = 0
         self.prediction_cache = {}
 
     def reset(self) -> np.ndarray:
         self.current_step = 0
 
-        # Distribute taxis proportional to average latent demand across the week
+        ## ---> KIV: To amend once the taxi start-state code is set-up <---
+        # This current code: Distribute taxis proportional to average latent demand across the week
+        # Taxis appear to meet demand, not realistic. 
+        
         pu_avg_demand = np.zeros(self.n_arms)
         for idx, pu in self.idx_to_pu.items():
             demands = [self.demand_lookup.get((pu, d, h), 0.0) for d in range(7) for h in range(24)]
@@ -96,7 +106,7 @@ class MonopolyTaxiEnv:
         return self._get_states()
 
     def _get_states(self) -> np.ndarray:
-        # Discretize taxi counts
+        # Discretize taxi counts -- reduce number of states / strategies / arms, makes problem simpler to solve (small state space)
         states = np.minimum(self.taxis // self.bin_size, self.n_states - 1)
         return states.astype(int)
 
@@ -107,22 +117,24 @@ class MonopolyTaxiEnv:
         day = (self.start_day + total_hours // 24) % 7
 
         rewards = np.zeros(self.n_arms)
-        next_taxis = np.zeros(self.n_arms, dtype=int)
+        next_taxis = np.zeros(self.n_arms, dtype=int) #array to get the number of taxis for the start of next round??
 
-        for idx in range(self.n_arms):
+        for idx in range(self.n_arms): #iterate over every zone. note that index is sequential, PU zones are not, hence the mapping.
             pu = self.idx_to_pu[idx]
             taxis_here = self.taxis[idx]
-            action = actions[idx]
+            action = actions[idx] #actions is a 262-length array where every entry is {0, 1}, in each zone activate strategy or not. currently Boolean. 
+            ## needs to be modified, the agent should choose a number instead of a boolean strategy of "activate or not"
 
-            # 1 = Active (surge pricing), 0 = Passive (baseline)
-            multiplier = self.active_multiplier if action == 1 else 1.0
+            # Multiplier choice: action index corresponds to options [1.0, 1.2, 1.5, 1.8, 2.0]
+            multipliers_options = [1.0, 1.2, 1.5, 1.8, 2.0]
+            multiplier = multipliers_options[action]
 
             # Latent demand rate
             lambda_latent = self.demand_lookup.get((pu, day, hour), 0.0)
 
             # Customer acceptance rate = exp(-theta * (surge - 1))
-            lambda_actual = lambda_latent * np.exp(-self.theta * (multiplier - 1.0))
-            demand = np.random.poisson(lambda_actual) ### <--- 
+            lambda_actual = lambda_latent * np.exp(-self.theta * (multiplier - 1.0)) #generates observed demand 
+            demand = np.random.poisson(lambda_actual) ### <--- the actual number of people that end up ordering a taxi
 
             # Matching step
             matched = min(demand, taxis_here)
@@ -131,34 +143,34 @@ class MonopolyTaxiEnv:
             # Unmatched taxis stay in the zone
             next_taxis[idx] += unmatched
 
-            if matched > 0:
+            if matched > 0: #note: still on a single zone here. 
                 # Sample destinations
                 cache_key = (pu, day, hour)
-                if cache_key not in self.prediction_cache:
-                    nn_probs = self.predictor.predict(pu, day, hour)
-                    sim_probs = np.zeros(self.n_arms)
-                    for do_idx, do_val in self.predictor.idx_to_do.items():
-                        target_pu = self.do_to_pu.get(do_val)
-                        if target_pu in self.pu_to_idx:
-                            sim_probs[self.pu_to_idx[target_pu]] += nn_probs[do_idx]
+                if cache_key not in self.prediction_cache: #prevents recalculation -- if it's in cache, then just calls results from there. 
+                    nn_probs = self.predictor.predict(pu, day, hour) #passenger distribution. 
+                    sim_probs = np.zeros(self.n_arms) 
+                    for do_idx, do_val in self.predictor.idx_to_do.items(): #each drop-off location has a index. 
+                        target_pu = self.do_to_pu.get(do_val) # get target pick-up point (for drop-off)
+                        if target_pu in self.pu_to_idx: 
+                            #simulation probability of index corresponding to pickup += neural network probs of drop-off index. 
+                            sim_probs[self.pu_to_idx[target_pu]] += nn_probs[do_idx] 
                     if sim_probs.sum() > 0:
                         sim_probs /= sim_probs.sum()
                     else:
-                        sim_probs = np.ones(self.n_arms) / self.n_arms
+                        sim_probs = np.ones(self.n_arms) / self.n_arms #equal probability across all states
                     self.prediction_cache[cache_key] = sim_probs
                 else:
                     sim_probs = self.prediction_cache[cache_key]
 
-                destinations = np.random.choice(self.n_arms, size=matched, p=sim_probs)
+                destinations = np.random.choice(self.n_arms, size=matched, p=sim_probs) #why p=sim_probs here instead of p=nn_probs? 
 
                 # Move matched taxis and accumulate fare rewards
-                for dest in destinations:
-                    next_taxis[dest] += 1
-
+                for dest in destinations: #for every taxi
+                    next_taxis[dest] += 1 
                     dest_pu = self.idx_to_pu[dest]
-                    fare_info = self.graph_dict.get(pu, {}).get(dest_pu)
+                    fare_info = self.graph_dict.get(pu, {}).get(dest_pu) 
                     if fare_info:
-                        base_fare = fare_info["fare"]
+                        base_fare = fare_info["fare"] 
                     else:
                         # Regression fallback
                         base_fare = self.default_distance * self.price_per_mile + self.intercept
@@ -186,7 +198,7 @@ class OligopolyTaxiEnv:
         n_states: int = 10,
         bin_size: int = 10,
         theta: float = 0.4,
-        steps_per_episode: int = 24,
+        steps_per_episode: int = 120,
         start_day: int = 0,
         start_hour: int = 0,
         default_distance: float = 5.0,
@@ -218,7 +230,12 @@ class OligopolyTaxiEnv:
             pu = row["PULocationID"]
             day = row["day_of_week"]
             hour = row["request_hour"]
-            self.demand_lookup[(pu, day, hour)] = row["latent_poisson"]
+            val = row["latent_poisson"]
+            if val is None or np.isnan(val):
+                val = row["historical_poisson"]
+                if val is None or np.isnan(val):
+                    val = 0.0
+            self.demand_lookup[(pu, day, hour)] = val
 
         self.taxis = np.zeros((4, self.n_arms), dtype=int)
         self.current_step = 0
@@ -268,15 +285,22 @@ class OligopolyTaxiEnv:
             D_latent = np.random.poisson(lambda_latent)
 
             if D_latent > 0:
-                # Multinomial choice probabilities
-                # V_k = exp(-theta * (S_k - 1))
+                ### Calculate choice probabilities using a normalized demand model.
+                ### The overall market acceptance probability matches a single-operator demand curve at the average price,
+                ### preventing artificial market-size inflation from multi-platform competition. Accepted passengers
+                ### are distributed among competing platforms proportional to their pricing utility.
+
                 v_vals = np.exp(-self.theta * (mults - 1.0))
                 sum_v = np.sum(v_vals)
+                avg_mult = np.mean(mults)
+                p_accept = np.exp(-self.theta * (avg_mult - 1.0))
                 
-                # Probability vector (4 platforms + outside option)
                 probs = np.zeros(5)
-                probs[:4] = v_vals / (sum_v + 1.0)
-                probs[4] = 1.0 / (sum_v + 1.0)
+                if sum_v > 0:
+                    probs[:4] = p_accept * (v_vals / sum_v)
+                else:
+                    probs[:4] = p_accept * 0.25
+                probs[4] = 1.0 - p_accept
 
                 # Sample customer allocation
                 demands = np.random.multinomial(D_latent, probs)
@@ -332,7 +356,7 @@ class OligopolyTaxiEnv:
 
 
 def run_monopoly_experiment(args, latent_df, graph_dict, predictor, do_to_pu, default_fare_params):
-    print("\n--- Running Monopoly (Restless Multi-Armed Bandit Q-Learning) Simulation ---")
+    print("\n--- Running Monopoly (Independent Q-Learning) Simulation ---")
     env = MonopolyTaxiEnv(
         latent_df=latent_df,
         graph_dict=graph_dict,
@@ -348,13 +372,12 @@ def run_monopoly_experiment(args, latent_df, graph_dict, predictor, do_to_pu, de
         active_multiplier=args.active_multiplier
     )
 
-    # Use rmab_q_learning from rmab_algorithms
-    # Note: budget controls how many zones can be active (surged) at once
-    q_tables, rewards_history = rmab_q_learning(
+    # Use run_iql from iql
+    q_tables, rewards_history = run_iql(
         env=env,
-        n_arms=env.n_arms,
+        n_agents=env.n_arms,
         n_states=args.n_states,
-        budget=args.budget,
+        n_actions=5,
         episodes=args.episodes,
         steps_per_episode=args.steps,
         alpha=args.alpha,
@@ -373,7 +396,7 @@ def run_monopoly_experiment(args, latent_df, graph_dict, predictor, do_to_pu, de
     moving_avg = np.convolve(rewards_history, np.ones(window)/window, mode='valid')
     plt.plot(range(window - 1, len(rewards_history)), moving_avg, label=f"{window}-Ep Moving Avg", color="#005b96", linewidth=2.5)
     
-    plt.title("Monopoly Ride-Hailing RMAB Q-Learning Revenue Curve", fontsize=14, fontweight="bold")
+    plt.title("Monopoly Ride-Hailing Independent Q-Learning (IQL) Revenue Curve", fontsize=14, fontweight="bold")
     plt.xlabel("Episode", fontsize=12)
     plt.ylabel("Total Revenue ($)", fontsize=12)
     plt.grid(True, linestyle="--", alpha=0.5)
@@ -402,7 +425,7 @@ def run_oligopoly_experiment(args, latent_df, graph_dict, predictor, do_to_pu, d
         intercept=default_fare_params["intercept"]
     )
 
-    multipliers = np.array([1.0, 1.2, 1.5, 1.8])
+    multipliers = np.array([1.0, 1.2, 1.5, 1.8, 2.0])
     agents = [
         Exp3Agent(n_arms=env.n_arms, n_actions=4, gamma=args.gamma, eta=args.eta)
         for _ in range(4)
@@ -491,20 +514,23 @@ def main():
     parser = argparse.ArgumentParser(description="RL Taxi Simulation Experiment Pipeline")
     parser.add_argument("--mode", type=str, choices=["monopoly", "oligopoly"], default="monopoly",
                         help="Choose monopoly simulation (RMAB Q-learning) or oligopoly simulation (4-Agent EXP3)")
-    parser.add_argument("--episodes", type=int, default=100, help="Number of episodes to simulate")
+    ### Set defaults for experiment configurations. n-states is set to 1 for state-free learning,
+    ### and alpha is set to 0.2 to accelerate Q-value convergence under IQL.
+
+    parser.add_argument("--episodes", type=int, default=80, help="Number of episodes to simulate")
     parser.add_argument("--steps", type=int, default=24, help="Time steps per episode (hours)")
     parser.add_argument("--taxis", type=int, default=5000, help="Total fleet size of taxis in the simulation")
-    parser.add_argument("--n-states", type=int, default=10, help="Number of states for discretized taxi count")
+    parser.add_argument("--n-states", type=int, default=1, help="Number of states for discretized taxi count")
     parser.add_argument("--bin-size", type=int, default=10, help="Bin size to discretize taxi counts")
     parser.add_argument("--theta", type=float, default=0.4, help="Passenger price sensitivity parameter")
     parser.add_argument("--discount", type=float, default=0.95, help="Discount factor (discount)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
 
     # Monopoly-specific arguments
-    parser.add_argument("--budget", type=int, default=50, help="Monopoly budget constraint on active (surging) zones")
-    parser.add_argument("--alpha", type=float, default=0.05, help="Q-learning rate (alpha)")
+    parser.add_argument("--budget", type=int, default=80, help="Monopoly budget constraint on active (surging) zones")
+    parser.add_argument("--alpha", type=float, default=0.2, help="Q-learning rate (alpha)")
     parser.add_argument("--eps", type=float, default=0.1, help="Q-learning exploration probability (eps)")
-    parser.add_argument("--active-multiplier", type=float, default=1.5, help="Surge pricing multiplier for active Monopoly action")
+    parser.add_argument("--active-multiplier", type=float, default=1.5, help="Surge pricing multiplier for active Monopoly action") ## to modify to give a few more options
 
     # Oligopoly-specific arguments
     parser.add_argument("--gamma", type=float, default=0.1, help="EXP3 exploration parameter (gamma)")

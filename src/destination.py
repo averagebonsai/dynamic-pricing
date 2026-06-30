@@ -9,6 +9,15 @@ from sklearn.neural_network import MLPClassifier #this is not very optimal, but 
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import log_loss
 
+"""
+DestinationNNPredictor: 
+- Inputs: Zone, Hour of Week (Day of Week, Hour of Day)
+- Outputs: A 262-length array of probabilities that a taxi would move from the input zone to a particular zone. 
+- Architecture: 
+--- A simple MLP with 2 hidden layers, with 128 and 64 neurons in each respective hidden layer. 
+--- ReLU activations in between, Softmax activation in output layer. 
+"""
+
 class DestinationNNPredictor:
     def __init__(self, hidden_layer_sizes=(128, 64), max_iter=15, random_state=42):
         self.hidden_layer_sizes = hidden_layer_sizes

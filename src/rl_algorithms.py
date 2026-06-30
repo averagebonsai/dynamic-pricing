@@ -29,7 +29,7 @@ All states are assumed to be discrete integer IDs.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 
@@ -256,6 +256,8 @@ def independent_q_learning(
     discount: float = 0.95,
     eps: float = 0.1,
     policy: str = "epsilon_greedy",
+    reward_transformer: Optional[Callable[[Any, float, int], float]] = None,
+    callback: Optional[Callable[[int, np.ndarray, float, np.ndarray], None]] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Independent Q-learning for multi-agent reinforcement learning.
@@ -264,34 +266,64 @@ def independent_q_learning(
     environment. This is a simple baseline for oligopoly experiments.
     """
     q_tables = np.zeros((n_agents, n_states, n_actions), dtype=float)
-    episode_rewards: List[np.ndarray] = []
+    episode_rewards: List[float] = []
 
-    for _ in range(episodes):
-        state = int(env.reset())
-        total_rewards = np.zeros(n_agents, dtype=float)
+    for ep in range(episodes):
+        states = env.reset()
+        if np.isscalar(states) or (isinstance(states, np.ndarray) and states.ndim == 0):
+            states = np.full(n_agents, int(states), dtype=int)
+        else:
+            states = np.asarray(states, dtype=int)
 
-        for _ in range(steps_per_episode):
+        total_reward = 0.0
+        actions_in_episode = []
+
+        for step in range(steps_per_episode):
             actions = np.asarray([
-                select_action(q_tables[i, state], eps=eps, policy=policy)
+                select_action(q_tables[i, states[i]], eps=eps, policy=policy)
                 for i in range(n_agents)
             ], dtype=int)
+            
+            actions_in_episode.append(actions.copy())
 
-            next_state, rewards, done, _ = unpack_step(env.step(actions))
-            next_state = int(next_state)
+            next_states, rewards, done, _ = unpack_step(env.step(actions))
+            
+            if np.isscalar(next_states) or (isinstance(next_states, np.ndarray) and next_states.ndim == 0):
+                next_states = np.full(n_agents, int(next_states), dtype=int)
+            else:
+                next_states = np.asarray(next_states, dtype=int)
+                
             rewards = np.asarray(rewards, dtype=float)
 
             for i in range(n_agents):
                 action = actions[i]
-                target = rewards[i] + discount * np.max(q_tables[i, next_state])
-                q_tables[i, state, action] += alpha * (target - q_tables[i, state, action])
+                r = rewards[i]
+                
+                if reward_transformer is not None:
+                    scaled_r = reward_transformer(env, r, i)
+                elif hasattr(env, "taxis"):
+                    n_taxis = env.taxis[i]
+                    if n_taxis > 0:
+                        avg_fare = r / n_taxis
+                        scaled_r = np.clip(avg_fare / 100.0, 0.0, 1.0)
+                    else:
+                        scaled_r = 0.0
+                else:
+                    scaled_r = r
+                    
+                target = scaled_r + discount * np.max(q_tables[i, next_states[i]])
+                q_tables[i, states[i], action] += alpha * (target - q_tables[i, states[i], action])
 
-            total_rewards += rewards
-            state = next_state
+            total_reward += float(np.sum(rewards))
+            states = next_states
 
             if done:
                 break
 
-        episode_rewards.append(total_rewards.copy())
+        episode_rewards.append(total_reward)
+
+        if callback is not None:
+            callback(ep, q_tables, total_reward, np.asarray(actions_in_episode))
 
     return q_tables, np.asarray(episode_rewards)
 

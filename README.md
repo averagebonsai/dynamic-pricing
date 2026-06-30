@@ -1,4 +1,6 @@
-Online Learning for Dynamic Pricing and Inventory Management
+Introduction
+
+This project is part of BlendED's AI+X Project-Based Learning (PBL); Track 1: Online Learning for Dynamic Pricing and Inventory Management
 
 STRATEGIC FLEET ALLOCATION.
 - Outsmarting the NYC Oligopoly with Adversarial Bandits.

@@ -1,3 +1,5 @@
+Online Learning for Dynamic Pricing and Inventory Management
+
 STRATEGIC FLEET ALLOCATION.
 - Outsmarting the NYC Oligopoly with Adversarial Bandits.
 - Can competing RL-based ride-hailing firms learn to tacitly collude?

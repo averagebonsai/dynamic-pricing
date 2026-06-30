@@ -1,6 +1,6 @@
 STRATEGIC FLEET ALLOCATION.
-Outsmarting the NYC Oligopoly with Adversarial Bandits.
-Can competing RL-based ride-hailing firms learn to tacitly collude?
+- Outsmarting the NYC Oligopoly with Adversarial Bandits.
+- Can competing RL-based ride-hailing firms learn to tacitly collude?
 
 The entry point for this experiment is in src/experiment_pipeline.py. 
 - It automatically runs the monopoly and the oligopoly experiments. 

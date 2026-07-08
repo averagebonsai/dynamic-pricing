@@ -251,7 +251,7 @@ def main():
     parser = argparse.ArgumentParser(description="Run Monopoly and Oligopoly pricing simulations with multiplier logging")
     parser.add_argument("--episodes", type=int, default=100, help="Number of episodes")
     parser.add_argument("--steps", type=int, default=120, help="Steps per episode")
-    parser.add_argument("--taxis", type=int, default=5000, help="Fleet size")
+    parser.add_argument("--taxis", type=int, nargs="+", default=[5000], help="Fleet size")
     parser.add_argument("--n-states", type=int, default=1, help="Number of states")
     parser.add_argument("--bin-size", type=int, default=10, help="Discretization bin size")
     parser.add_argument("--theta", type=float, default=0.4, help="Price sensitivity theta")

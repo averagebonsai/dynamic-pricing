@@ -457,7 +457,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--unfreeze-at", type=int, default=None)
     parser.add_argument("--post-unfreeze-episodes", type=int, default=70)
     parser.add_argument("--steps", type=int, default=120)
-    parser.add_argument("--taxis", type=int, default=5000)
+    parser.add_argument("--taxis", type=int, nargs="+", default=[5000])
     parser.add_argument("--n-states", type=int, default=10)
     parser.add_argument("--bin-size", type=int, default=10)
     parser.add_argument("--theta", type=float, default=0.4)

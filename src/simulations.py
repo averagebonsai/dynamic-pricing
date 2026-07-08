@@ -31,7 +31,19 @@ class MonopolyTaxiEnv:
         self.graph_dict = graph_dict
         self.predictor = predictor
         self.do_to_pu = do_to_pu
-        self.fleet_size = fleet_size
+        
+        # Validate and parse fleet_size
+        if isinstance(fleet_size, (list, np.ndarray, tuple)):
+            if len(fleet_size) == 1:
+                self.fleet_size = int(fleet_size[0])
+            elif len(fleet_size) == 4:
+                self.fleet_size = int(sum(fleet_size))
+            else:
+                raise ValueError("the number of inputs is not equal to the number of agents.")
+        elif isinstance(fleet_size, (int, float, np.integer)):
+            self.fleet_size = int(fleet_size)
+        else:
+            raise ValueError("the number of inputs is not equal to the number of agents.")
         self.n_states = n_states
         self.bin_size = bin_size
         self.theta = theta
@@ -204,7 +216,21 @@ class OligopolyTaxiEnv:
         self.graph_dict = graph_dict
         self.predictor = predictor
         self.do_to_pu = do_to_pu
-        self.fleet_size = fleet_size
+        
+        # Validate and parse fleet_size
+        if isinstance(fleet_size, (list, np.ndarray, tuple)):
+            if len(fleet_size) == 1:
+                val = int(fleet_size[0])
+                self.fleet_size = [val // 4] * 4
+            elif len(fleet_size) == 4:
+                self.fleet_size = [int(x) for x in fleet_size]
+            else:
+                raise ValueError("the number of inputs is not equal to the number of agents.")
+        elif isinstance(fleet_size, (int, float, np.integer)):
+            val = int(fleet_size)
+            self.fleet_size = [val // 4] * 4
+        else:
+            raise ValueError("the number of inputs is not equal to the number of agents.")
         self.n_states = n_states
         self.bin_size = bin_size
         self.theta = theta
@@ -242,10 +268,8 @@ class OligopolyTaxiEnv:
         # Distribute taxis uniformly across all zones
         probs = np.ones(self.n_arms) / self.n_arms
 
-        # Equal share of fleet for each platform
-        platform_fleet = self.fleet_size // 4
         for k in range(4):
-            self.taxis[k] = np.random.multinomial(platform_fleet, probs)
+            self.taxis[k] = np.random.multinomial(self.fleet_size[k], probs)
 
         return self._get_states()
 

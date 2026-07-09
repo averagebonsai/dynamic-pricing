@@ -4,14 +4,9 @@ run_parallel_experiments.py
 ===========================
 GCP Multi-core parallel execution script for Courthoud freeze/unfreeze experiments.
 
-Since the four competing platforms (agents) are tightly coupled through the 
-shared taxi marketplace (competitive customer choice model, joint taxi transitions, 
-and step-by-step sequential learning updates), they cannot be split across cores.
-
-However, independent simulation runs (different deviating platforms and different 
-random seeds) can be run in parallel. This script leverages Python's 
-ProcessPoolExecutor to run multiple independent experiments concurrently, 
-fully utilizing multi-core GCP virtual machines.
+This version redirects the stdout and stderr of each subprocess dynamically
+to a `simulation.log` file in their respective output directories in real-time,
+enabling dynamic tracking of the progress.
 """
 
 import argparse
@@ -26,26 +21,38 @@ PROJECT_DIR = SCRIPT_DIR.parent
 
 
 def run_single_experiment(script_name: str, deviator: int, seed: int, out_dir: str, extra_args: list[str]) -> tuple[int, int, float, bool]:
-    """Runs a single simulation run as a subprocess to avoid state corruption/locks."""
+    """Runs a single simulation run as a subprocess and redirects output dynamically to a log file."""
+    run_dir = Path(out_dir) / f"deviator_{deviator}_seed_{seed}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    log_file_path = run_dir / "simulation.log"
+
+    # Use sys.executable and add '-u' for unbuffered stdout/stderr
     cmd = [
         sys.executable,
+        "-u",
         str(SCRIPT_DIR / script_name),
         "--deviator", str(deviator),
         "--seed", str(seed),
-        "--out-dir", str(Path(out_dir) / f"deviator_{deviator}_seed_{seed}"),
+        "--out-dir", str(run_dir),
     ] + extra_args
 
     print(f"[START] Running: deviator={deviator}, seed={seed} (Command: {' '.join(cmd)})")
+    print(f"[LOGGING] Outputs dynamically redirected to: [simulation.log](file://{log_file_path})")
+    sys.stdout.flush()
+
     start_time = time.time()
     try:
-        # Run subprocess and capture output
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        # Redirect stdout and stderr directly to the log file in real-time
+        with open(log_file_path, "w") as log_file:
+            subprocess.run(cmd, stdout=log_file, stderr=subprocess.STDOUT, text=True, check=True)
         duration = time.time() - start_time
         print(f"[SUCCESS] Finished: deviator={deviator}, seed={seed} in {duration:.1f}s")
+        sys.stdout.flush()
         return deviator, seed, duration, True
     except subprocess.CalledProcessError as e:
         duration = time.time() - start_time
-        print(f"[FAILURE] Failed: deviator={deviator}, seed={seed} in {duration:.1f}s\nError:\n{e.stderr}")
+        print(f"[FAILURE] Failed: deviator={deviator}, seed={seed} in {duration:.1f}s. Check log: [simulation.log](file://{log_file_path})")
+        sys.stdout.flush()
         return deviator, seed, duration, False
 
 
@@ -84,6 +91,7 @@ def main():
             tasks.append((args.script, deviator, seed, args.out_dir, extra_args))
 
     print(f"=== Starting {len(tasks)} parallel runs on {args.cores or 'all'} cores ===")
+    sys.stdout.flush()
     total_start = time.time()
     
     success_count = 0
@@ -107,6 +115,7 @@ def main():
         print(f"Failed runs: {failures}")
     else:
         print("All parallel runs completed successfully!")
+    sys.stdout.flush()
 
 
 if __name__ == "__main__":

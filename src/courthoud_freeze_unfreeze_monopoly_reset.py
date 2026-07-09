@@ -34,6 +34,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -209,6 +211,8 @@ def evaluate_before_freeze(args, latent_df, graph_dict, predictor, do_to_pu, far
             total_profit += rewards_by_zone.sum(axis=1)
             if done:
                 break
+        if args.log_every and ((ep + 1) % args.log_every == 0 or ep == 0):
+            print(f"before freeze eval {ep+1}/{args.baseline_eval_episodes} | avg_mult={np.round(fixed_multipliers.mean(axis=1), 3).tolist()}")
         for firm in range(N_FIRMS):
             rows.append({
                 "iteration": ep,
@@ -249,6 +253,8 @@ def run_freeze_unfreeze(args, latent_df, graph_dict, predictor, do_to_pu, fare_p
             total_mult += multipliers.mean(axis=1)
             if done:
                 break
+        if args.log_every and ((ep + 1) % args.log_every == 0 or ep == 0):
+            print(f"freeze phase {ep+1}/{freeze_phase_episodes} | revenue={np.round(total_profit, 2).tolist()} | avg_mult={np.round(total_mult / args.steps, 3).tolist()}")
         iteration = freeze_iteration + ep
         for firm in range(N_FIRMS):
             rows.append({
@@ -284,6 +290,8 @@ def run_freeze_unfreeze(args, latent_df, graph_dict, predictor, do_to_pu, fare_p
             total_mult += multipliers.mean(axis=1)
             if done:
                 break
+        if args.log_every and ((ep + 1) % args.log_every == 0 or ep == 0):
+            print(f"post-unfreeze phase {ep+1}/{args.post_unfreeze_episodes} | revenue={np.round(total_profit, 2).tolist()} | avg_mult={np.round(total_mult / args.steps, 3).tolist()}")
         iteration = unfreeze_iteration + ep
         for firm in range(N_FIRMS):
             rows.append({
@@ -362,11 +370,15 @@ def add_phase_lines(ax, freeze_iteration: int, unfreeze_iteration: int) -> None:
     ax.text(unfreeze_iteration, ymin + 0.78 * (ymax - ymin), "THE UNFREEZE", rotation=90, ha="left", va="center", color=UNFREEZE_COLOR, fontsize=10)
 
 
-def plot_revenue(df: pd.DataFrame, out_dir: Path, deviator: int, ma_window: int, dpi: int, monopoly: Optional[np.ndarray]) -> None:
-    revenue = wide(df, "profit")
+def plot_revenue(df: pd.DataFrame, out_dir: Path, deviator: int, ma_window: int, dpi: int, monopoly: Optional[np.ndarray], fleet_sizes: list[int]) -> None:
+    revenue = wide(df, "revenue_per_taxi")
     freeze = int(df["freeze_iteration"].iloc[0])
     unfreeze = int(df["unfreeze_iteration"].iloc[0])
     x = revenue.index.to_numpy()
+    
+    total_fleet = sum(fleet_sizes)
+    
+    # 1. Episode Revenue per Taxi Plot
     fig, ax = plt.subplots(figsize=(14, 7))
     for firm in range(N_FIRMS):
         y = revenue[firm].to_numpy(dtype=float)
@@ -376,39 +388,41 @@ def plot_revenue(df: pd.DataFrame, out_dir: Path, deviator: int, ma_window: int,
         ax.plot(x, y, color=PLATFORM_COLORS[firm], alpha=0.17, linewidth=1.2, linestyle="-" if is_dev else "--")
         ax.plot(x, y_ma, color=PLATFORM_COLORS[firm], linestyle="-" if is_dev else "--", linewidth=3.2 if is_dev else 2.5, label=f"Platform {firm+1} ({role}, {ma_window}-Ep Avg)")
     if monopoly is not None:
-        mb = monopoly[:len(x)]
+        mb = monopoly[:len(x)] / (total_fleet / 4.0)
         ax.plot(x, mb, color="0.25", alpha=0.18, linewidth=1.2, linestyle="-")
-        ax.plot(x, moving_average_same_length(mb, ma_window), color=MONOPOLY_COLOR, linestyle="-", linewidth=3.4, label=f"1/4 Monopoly ({ma_window}-Ep Avg)")
+        ax.plot(x, moving_average_same_length(mb, ma_window), color=MONOPOLY_COLOR, linestyle="-", linewidth=3.4, label=f"Monopoly ({ma_window}-Ep Avg)")
     add_phase_lines(ax, freeze, unfreeze)
-    ax.set_title(f"Courthoud Defection Test Revenue Comparison — Platform {deviator+1} Deviates (Reset Frozen)", fontsize=18, weight="bold")
+    ax.set_title(f"Courthoud Defection Test Revenue per Taxi Comparison — Platform {deviator+1} Deviates (Reset Frozen)", fontsize=18, weight="bold")
     ax.set_xlabel("Episode", fontsize=14)
-    ax.set_ylabel("Total Revenue ($)", fontsize=14)
+    ax.set_ylabel("Revenue per Taxi ($)", fontsize=14)
     ax.grid(True, linestyle="--", alpha=0.35)
     ax.legend(loc="best", fontsize=10)
     fig.tight_layout()
     fig.savefig(out_dir / f"freeze_episode_total_revenue_with_monopoly_firm_{deviator}_deviates.png", dpi=dpi)
     plt.close(fig)
 
+    # 2. Cumulative Revenue per Taxi Plot
     cumulative = revenue.cumsum()
     fig, ax = plt.subplots(figsize=(14, 7))
     for firm in range(N_FIRMS):
+        y = cumulative[firm].to_numpy(dtype=float)
         is_dev = firm == deviator
         role = "deviator / continuous learning" if is_dev else "frozen, reset, then learning"
-        ax.plot(x, cumulative[firm].to_numpy(dtype=float), color=PLATFORM_COLORS[firm], linestyle="-" if is_dev else "--", linewidth=3.2 if is_dev else 2.5, label=f"Platform {firm+1} ({role})")
+        ax.plot(x, y, color=PLATFORM_COLORS[firm], linestyle="-" if is_dev else "--", linewidth=3.2 if is_dev else 2.5, label=f"Platform {firm+1} ({role})")
     if monopoly is not None:
-        ax.plot(x, np.cumsum(monopoly[:len(x)]), color=MONOPOLY_COLOR, linestyle="-", linewidth=3.4, label="1/4 Monopoly")
+        mb_cum = np.cumsum(monopoly[:len(x)]) / (total_fleet / 4.0)
+        ax.plot(x, mb_cum, color=MONOPOLY_COLOR, linestyle="-", linewidth=3.4, label="Monopoly")
     add_phase_lines(ax, freeze, unfreeze)
-    ax.set_title(f"Courthoud Defection Test Cumulative Revenue — Platform {deviator+1} Deviates (Reset Frozen)", fontsize=18, weight="bold")
+    ax.set_title(f"Courthoud Defection Test Cumulative Revenue per Taxi — Platform {deviator+1} Deviates (Reset Frozen)", fontsize=18, weight="bold")
     ax.set_xlabel("Episode", fontsize=14)
-    ax.set_ylabel("Cumulative Total Revenue ($)", fontsize=14)
+    ax.set_ylabel("Cumulative Revenue per Taxi ($)", fontsize=14)
     ax.grid(True, linestyle="--", alpha=0.35)
     ax.legend(loc="best", fontsize=10)
     fig.tight_layout()
     fig.savefig(out_dir / f"freeze_cumulative_total_revenue_with_monopoly_firm_{deviator}_deviates.png", dpi=dpi)
     plt.close(fig)
 
-
-def save_summary(df: pd.DataFrame, out_dir: Path, deviator: int) -> None:
+def save_summary(df: pd.DataFrame, out_dir: Path, deviator: int, fleet_sizes: list[int]) -> None:
     revenue = wide(df, "profit")
     freeze = int(df["freeze_iteration"].iloc[0])
     unfreeze = int(df["unfreeze_iteration"].iloc[0])
@@ -417,14 +431,22 @@ def save_summary(df: pd.DataFrame, out_dir: Path, deviator: int) -> None:
         before = revenue.index < freeze
         freeze_phase = (revenue.index >= freeze) & (revenue.index < unfreeze)
         after = revenue.index >= unfreeze
+        
+        fleet_size = fleet_sizes[firm]
+        
         rows.append({
             "deviator_firm_id": deviator,
             "firm_id": firm,
             "role": "deviator" if firm == deviator else "frozen_reset_learning",
+            "fleet_size": fleet_size,
             "before_freeze_mean_revenue": float(revenue.loc[before, firm].mean()) if before.any() else np.nan,
             "freeze_phase_mean_revenue": float(revenue.loc[freeze_phase, firm].mean()) if freeze_phase.any() else np.nan,
             "post_unfreeze_mean_revenue": float(revenue.loc[after, firm].mean()) if after.any() else np.nan,
             "final_cumulative_revenue": float(revenue[firm].cumsum().iloc[-1]),
+            "before_freeze_mean_rev_per_taxi": float(revenue.loc[before, firm].mean() / fleet_size) if before.any() else np.nan,
+            "freeze_phase_mean_rev_per_taxi": float(revenue.loc[freeze_phase, firm].mean() / fleet_size) if freeze_phase.any() else np.nan,
+            "post_unfreeze_mean_rev_per_taxi": float(revenue.loc[after, firm].mean() / fleet_size) if after.any() else np.nan,
+            "final_cumulative_rev_per_taxi": float(revenue[firm].cumsum().iloc[-1] / fleet_size),
         })
     pd.DataFrame(rows).to_csv(out_dir / f"freeze_summary_with_monopoly_firm_{deviator}.csv", index=False)
 
@@ -481,14 +503,16 @@ def main() -> None:
     before_rows = evaluate_before_freeze(args, latent_df, graph_dict, predictor, do_to_pu, fare_params, fixed_multipliers, deviator)
     after_rows = run_freeze_unfreeze(args, latent_df, graph_dict, predictor, do_to_pu, fare_params, agents, fixed_multipliers, deviator)
     df = pd.DataFrame(before_rows + after_rows)
+    fleet_sizes = [args.taxis[0] // 4] * 4 if len(args.taxis) == 1 else [int(x) for x in args.taxis]
+    df["revenue_per_taxi"] = df.apply(lambda row: row["profit"] / fleet_sizes[int(row["firm_id"])], axis=1)
 
     timeline_path = out_dir / f"courthoud_freeze_unfreeze_timeline_deviator_firm_{deviator}.csv"
     df.to_csv(timeline_path, index=False)
 
     target_len = int(df["iteration"].max()) + 1
     monopoly = load_monopoly_benchmark(args, target_len)
-    plot_revenue(df, out_dir, deviator, args.ma_window, args.dpi, monopoly)
-    save_summary(df, out_dir, deviator)
+    plot_revenue(df, out_dir, deviator, args.ma_window, args.dpi, monopoly, fleet_sizes)
+    save_summary(df, out_dir, deviator, fleet_sizes)
 
     print(f"saved timeline: {timeline_path}")
     print(f"saved plots to: {out_dir}")

@@ -2,6 +2,9 @@ import numpy as np
 import polars as pl
 from destination import DestinationNNPredictor
 
+# Shared global prediction cache to persist predictions across environment reinstantiations
+_PREDICTION_CACHE = {}
+
 
 class MonopolyTaxiEnv:
     """
@@ -74,7 +77,7 @@ class MonopolyTaxiEnv:
 
         self.taxis = np.zeros(self.n_arms, dtype=int) #initialise: array of 262 zeros. 
         self.current_step = 0
-        self.prediction_cache = {}
+        self.prediction_cache = _PREDICTION_CACHE
 
         # --- Precomputations for Vectorization ---
         # Precompute the demand matrix of shape (n_arms, 7, 24)
@@ -140,8 +143,8 @@ class MonopolyTaxiEnv:
         else:
             relo_probs = np.ones(self.n_arms) / self.n_arms
 
-        # Get batch predictions for destinations (cached across steps/episodes)
-        cache_key = (day, hour)
+        # Get batch predictions for destinations (cached across steps/episodes/environments)
+        cache_key = (id(self.predictor), day, hour)
         if cache_key not in self.prediction_cache:
             pus = list(self.idx_to_pu.values())
             input_data = np.empty((len(pus), 3))
@@ -272,7 +275,7 @@ class OligopolyTaxiEnv:
 
         self.taxis = np.zeros((4, self.n_arms), dtype=int)
         self.current_step = 0
-        self.prediction_cache = {}
+        self.prediction_cache = _PREDICTION_CACHE
 
         # --- Precomputations for Vectorization ---
         # Precompute the demand matrix of shape (n_arms, 7, 24)
@@ -339,8 +342,8 @@ class OligopolyTaxiEnv:
         else:
             relo_probs = np.ones(self.n_arms) / self.n_arms
 
-        # Get batch predictions for destinations (cached across steps/episodes)
-        cache_key = (day, hour)
+        # Get batch predictions for destinations (cached across steps/episodes/environments)
+        cache_key = (id(self.predictor), day, hour)
         if cache_key not in self.prediction_cache:
             pus = list(self.idx_to_pu.values())
             input_data = np.empty((len(pus), 3))

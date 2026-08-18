@@ -13,6 +13,9 @@ class ZoneQLearner:
 
     The zones are factorised deliberately: learning a joint policy over every
     zone's multiplier would require an infeasibly large action space.
+
+    Corresponds to a 3D tensor of (252, 10, 5): 
+    - 252 zones, 10 bins for number of taxis, 5 potential actions. 
     """
 
     n_zones: int

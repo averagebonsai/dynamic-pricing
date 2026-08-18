@@ -8,4 +8,5 @@
 *.npz
 *.pkl
 *.png
+*.jpeg
 experiments/
